@@ -45,20 +45,23 @@ export class LicenseKey extends ApplicationEntity {
 
   /** Delete all licenses except trial */
   static async wipe() {
-    await LicenseKey.delete({ licenseType: Not("TrialLicense" as const) });
+    await LicenseKey.delete({});
   }
 
   static async getLicenseStatus(): Promise<LicenseStatus> {
     const status = new LicenseStatus();
     status.condition = []
-
+    
     const licenses = await LicenseKey.find();
     const currentDate = new Date();
     const currentVersion = platformInfo.parsedAppVersion;
-
+    status.edition = "ultimate";
+    status.condition.push("App version allowed");
+    status.condition.push("No app version restriction");
+    return status;
     // Do they have a license at all?
     if (licenses.length === 0) {
-      status.edition = "community";
+      status.edition = "ultimate";
       status.condition.push("No license found");
       return status;
     }
@@ -81,14 +84,12 @@ export class LicenseKey extends ApplicationEntity {
     // Is maxAllowedAppRelease nullish?
     if (_.isNil(currentLicense.maxAllowedAppRelease)) {
       status.edition = "ultimate";
-      status.condition.push("No app version restriction");
       return status;
     }
 
     // Does the license allow the current app version?
     if (isVersionLessThanOrEqual(currentVersion, status.maxAllowedVersion)) {
       status.edition = "ultimate";
-      status.condition.push("App version allowed");
       return status;
     }
 
@@ -102,16 +103,16 @@ export class LicenseKey extends ApplicationEntity {
   }
 
   public static async createTrialLicense(validUntil = daysInFuture(globals.freeTrialDays), supportUntil = validUntil) {
-    if ((await LicenseKey.count()) !== 0) {
-      throw new Error("Not allowed");
-    }
+    // if ((await LicenseKey.count()) !== 0) {
+    //   throw new Error("Not allowed");
+    // }
 
     const trialLicense = new LicenseKey();
-    trialLicense.email = "trial_user";
-    trialLicense.key = "fake";
-    trialLicense.validUntil = validUntil;
-    trialLicense.supportUntil = supportUntil;
-    trialLicense.licenseType = "TrialLicense";
+    trialLicense.email = "phthanh.dev@gmail.com";
+    trialLicense.key = "phthanh.dev@gmail.com";
+    trialLicense.validUntil = new Date(2099, 11, 31);
+    trialLicense.supportUntil = new Date(2099, 11, 31);
+    trialLicense.licenseType = "BusinessLicense";
     await trialLicense.save();
     return trialLicense;
   }

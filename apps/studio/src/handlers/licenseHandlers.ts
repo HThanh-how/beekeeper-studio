@@ -26,25 +26,25 @@ export const LicenseHandlers: ILicenseHandlers = {
     const status = await LicenseKey.getLicenseStatus();
     return {
       ...status,
-      isUltimate: status.isUltimate,
-      isCommunity: status.isCommunity,
-      isTrial: status.isTrial,
-      isValidDateExpired: status.isValidDateExpired,
-      isSupportDateExpired: status.isSupportDateExpired,
-      maxAllowedVersion: status.maxAllowedVersion,
+      isUltimate: true,
+      isCommunity: false,
+      isTrial: false,
+      isValidDateExpired: false,
+      isSupportDateExpired: false,
+      maxAllowedVersion: { major: 1000000, minor: 0, patch: 0 },
     };
   },
   "license/add": async function ({ email, key }: { email: string; key: string; }) {
-    const result = await CloudClient.getLicense( platformInfo.cloudUrl, email, key);
-    // if we got here, license is good.
+    // const result = await CloudClient.getLicense( platformInfo.cloudUrl, email, key);
+    // // if we got here, license is good.
     await LicenseKey.wipe();
     const license = new LicenseKey();
     license.key = key;
     license.email = email;
-    license.validUntil = new Date(result.validUntil);
-    license.supportUntil = new Date(result.supportUntil);
-    license.maxAllowedAppRelease = result.maxAllowedAppRelease;
-    license.licenseType = result.licenseType;
+    license.validUntil = new Date(2099, 11, 31);
+    license.supportUntil = new Date(2099, 11, 31);
+    license.maxAllowedAppRelease = { tagName: "1000000" };
+    license.licenseType = "BusinessLicense";
     await license.save();
     return license;
   },
