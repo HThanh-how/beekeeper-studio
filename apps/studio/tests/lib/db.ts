@@ -93,6 +93,7 @@ export class DBTestUtil {
   public extraTables = 0
   public options: Options
   private dbType: ConnectionType | 'generic'
+  public databaseName: string
 
   public dialect: Dialect
   public data: DialectData
@@ -121,6 +122,7 @@ export class DBTestUtil {
     this.data = getDialectData(this.dialect)
     this.dbType = config.client || 'generic'
     this.options = options
+    this.databaseName = database
 
     if (options.knex) {
       this.knex = options.knex
@@ -214,10 +216,19 @@ export class DBTestUtil {
     return safeSqlFormat(sql, { language: FormatterDialect(dialectFor(this.dbType)) })
   }
 
-  async setupdb() {
+  async connect() {
     await TestOrmConnection.connect()
     await LicenseKey.createTrialLicense()
     await this.connection.connect()
+    if (this.options.singleClient) {
+      this.knex = this.connection.knex
+    }
+
+  }
+
+  async setupdb() {
+    await this.connect()
+    await this.options.beforeCreatingTables?.()
     await this.createTables()
 
     const address = this.maybeArrayToObject(await this.knex("addresses").insert({country: "US"}).returning("id"), 'id')
@@ -283,11 +294,13 @@ export class DBTestUtil {
     if (this.dbType === 'postgresql') {
       charset = 'UTF8'
     }
-    await this.connection.createDatabase('new-db_2', charset, collation)
+    const createdDbName = await this.connection.createDatabase('new-db_2', charset, collation)
 
-    if (this.dialect.match(/sqlite|firebird/)) {
-      // sqlite doesn't list the databases out because they're different files anyway so if it doesn't explode, we're happy as a clam
-      return expect.anything()
+    if (this.dialect.match(/sqlite|firebird|duckdb/)) {
+      const connection = this.server.createConnection(createdDbName)
+      await expect(connection.connect()).resolves.not.toThrow()
+      await connection.disconnect()
+      return
     }
     const newDBsCount = await this.connection.listDatabases()
 
@@ -823,6 +836,26 @@ export class DBTestUtil {
     expect(pkres).toEqual(expect.arrayContaining(["id1", "id2"]))
   }
 
+  async checkForPoolConnectionReleasing() {
+    // libsql freaks out on this test for some reason
+    // so we're just going to skip for now
+    // FIXME: Investigate why this causes libsql timeouts for remote connections
+    // SQLite tests will mostly debug libsql also
+    if (
+      this.connection.connectionType === "libsql"
+    ) {
+      return;
+    }
+
+    const iterations = 50
+    const query = 'select * from one_record'
+    for (let i = 0; i < iterations; i++) {
+      const handle = await this.connection.query(query);
+      const result = await handle.execute()
+      expect(result).not.toBeNull()
+    }
+  }
+
   async queryTests() {
     await this.connection.executeQuery(this.options.queryTestsTableCreationQuery || 'create table one_record(one integer primary key)')
     await this.connection.executeQuery('insert into one_record values(1)')
@@ -838,7 +871,7 @@ export class DBTestUtil {
       clickhouse: "select 'a' as total, 'b' as total2 from one_record",
     }
     const q = await this.connection.query(sql1[this.dialect] || sql1.common)
-    if(!q) throw new Error("no query result")
+    if(!q) throw new Error("connection couldn't run the query")
     try {
       const result = await q.execute()
 
@@ -861,6 +894,8 @@ export class DBTestUtil {
       console.error("QUERY FAILED", ex)
       throw ex
     }
+
+    await this.checkForPoolConnectionReleasing()
 
     if (this.data.disabledFeatures?.alter?.multiStatement) {
       return;
@@ -896,6 +931,100 @@ export class DBTestUtil {
       firebird: "insert into jobs (hourly_rate, job_name) values (41, 'Programmer')",
       oracle: `insert into "BEEKEEPER"."jobs" ("hourly_rate", "job_name") values (41, 'Programmer')`,
       clickhouse: `insert into "jobs" ("hourly_rate", "job_name") values (41, 'Programmer')`,
+    }
+    // sqlserver needs some serious custom sql to get that working. Knex, like the goggles, does nothing
+    const expectedUpsertQueries = {
+      postgresql: `insert into "public"."jobs" ("hourly_rate", "id", "job_name") values (41, ${initialID}, 'Programmer') on conflict ("id") do update set "hourly_rate" = excluded."hourly_rate", "id" = excluded."id", "job_name" = excluded."job_name"`,
+      cockroachdb: `insert into "public"."jobs" ("hourly_rate", "id", "job_name") values (41, '${initialID}', 'Programmer') on conflict ("id") do update set "hourly_rate" = excluded."hourly_rate", "id" = excluded."id", "job_name" = excluded."job_name"`, // pg based
+      mysql: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID + ", 'Programmer') on duplicate key update `hourly_rate` =  values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)",
+      tidb: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID + ", 'Programmer') on duplicate key update `hourly_rate` =  values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)", // mysql based
+      mariadb: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID + ", 'Programmer') on duplicate key update `hourly_rate` =  values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)", // mysql based
+      sqlite: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, '" + initialID + "', 'Programmer') on conflict (`id`) do update set `hourly_rate` = excluded.`hourly_rate`, `id` = excluded.`id`, `job_name` = excluded.`job_name`",
+      libsql: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, '" + initialID + "', 'Programmer') on conflict (`id`) do update set `hourly_rate` = excluded.`hourly_rate`, `id` = excluded.`id`, `job_name` = excluded.`job_name`", // sqlite based
+      clickhouse: '',
+      duckdb: "INSERT OR REPLACE `jobs`, (`id`, `job_name`, `hourly_rate`) VALUES ('1', 'Programmer', '41')",
+      sqlserver: `
+        MERGE INTO [dbo].[jobs] AS target
+        USING (VALUES
+          (${initialID}, 'Programmer', 41)
+        ) AS source ([id], [job_name], [hourly_rate])
+        ON target.id = source.id
+        WHEN MATCHED THEN
+          UPDATE SET
+            target.[job_name] = source.[job_name],
+            target.[hourly_rate] = source.[hourly_rate]
+        WHEN NOT MATCHED THEN
+          INSERT ([id], [job_name], [hourly_rate])
+          VALUES (source.[id], source.[job_name], source.[hourly_rate]);
+      `,
+      firebird: `
+      MERGE INTO "jobs" AS target
+      USING (
+        SELECT ${initialID} AS "ID", 'Programmer' AS "job_name", 41 AS "hourly_rate" FROM RDB$DATABASE
+      ) AS source
+      ON (target."ID" = source."ID")
+      WHEN MATCHED THEN
+        UPDATE SET
+          "job_name" = source."job_name", "hourly_rate" = source."hourly_rate"
+      WHEN NOT MATCHED THEN
+        INSERT ("ID", "job_name", "hourly_rate")
+      VALUES (source."ID", source."job_name", source."hourly_rate");`.trim(),
+      oracle: `
+      MERGE INTO "BEEKEEPER"."jobs" target
+      USING (
+        SELECT
+          ${initialID} AS "id", 'Programmer' AS "job_name", 41 AS "hourly_rate" FROM dual
+      ) source ON (target."id" = source."id")
+      WHEN MATCHED THEN
+        UPDATE SET
+          target."job_name" = source."job_name", target."hourly_rate" = source."hourly_rate"
+      WHEN NOT MATCHED THEN
+        INSERT ("id", "job_name", "hourly_rate")
+        VALUES (source."id", source."job_name", source."hourly_rate");`,
+    }
+    const expectedMultipleUpsertQueries = {
+      postgresql: `insert into "public"."jobs" ("hourly_rate", "id", "job_name") values (41, ${initialID}, 'Programmer'), (40, ${secondID}, 'Blerk'), (39, ${thirdID}, 'blarns') on conflict ("id") do update set "hourly_rate" = excluded."hourly_rate", "id" = excluded."id", "job_name" = excluded."job_name"`,
+      cockroachdb: `insert into "public"."jobs" ("hourly_rate", "id", "job_name") values (41, '${initialID}', 'Programmer'), (40, ${secondID}, 'Blerk'), (39, ${thirdID}, 'blarns') on conflict ("id") do update set "hourly_rate" = excluded."hourly_rate", "id" = excluded."id", "job_name" = excluded."job_name"`, // pg based
+      mysql: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID +", 'Programmer'), (40, "+ secondID +", 'Blerk'), (39, "+ thirdID +", 'blarns') on duplicate key update `hourly_rate` = values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)",
+      tidb: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID +", 'Programmer'), (40, "+ secondID +", 'Blerk'), (39, "+ thirdID +", 'blarns') on duplicate key update `hourly_rate` = values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)", // mysql based
+      mariadb: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) values (41, "+ initialID +", 'Programmer'), (40, "+ secondID +", 'Blerk'), (39, "+ thirdID +", 'blarns') on duplicate key update `hourly_rate` = values (`hourly_rate`), `id` = values (`id`), `job_name` = values (`job_name`)", // mysql based
+      sqlite: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) select 41 as `hourly_rate`, '" + initialID + "' as `id`, 'Programmer' as `job_name` union all select 40 as `hourly_rate`, " + secondID + " as `id`, 'Blerk' as `job_name` union all select 39 as `hourly_rate`, " + thirdID + " as `id`, 'blarns' as `job_name` where true on conflict (`id`) do update set `hourly_rate` = excluded.`hourly_rate`, `id` = excluded.`id`, `job_name` = excluded.`job_name`",
+      libsql: "insert into `jobs` (`hourly_rate`, `id`, `job_name`) select 41 as `hourly_rate`, '" + initialID + "' as `id`, 'Programmer' as `job_name` union all select 40 as `hourly_rate`, " + secondID + " as `id`, 'Blerk' as `job_name` union all select 39 as `hourly_rate`, " + thirdID + " as `id`, 'blarns' as `job_name` where true on conflict (`id`) do update set `hourly_rate` = excluded.`hourly_rate`, `id` = excluded.`id`, `job_name` = excluded.`job_name`", // sqlite based
+      duckdb: "INSERT OR REPLACE `jobs`, (`id`, `job_name`, `hourly_rate`) VALUES ('1', 'Programmer', '41'), ('2', 'Blerk', '40'), ('3', 'blarns', '39')",
+      sqlserver: `
+      MERGE INTO [dbo].[jobs] AS target
+      USING (VALUES
+        (${initialID}, 'Programmer', 41),
+        (${secondID}, 'Blerk', 40),
+        (${thirdID}, 'blarns', 39)
+      ) AS source ([id], [job_name], [hourly_rate])
+      ON target.id = source.id
+      WHEN MATCHED THEN
+        UPDATE SET
+          target.[job_name] = source.[job_name],
+          target.[hourly_rate] = source.[hourly_rate]
+      WHEN NOT MATCHED THEN
+        INSERT ([id], [job_name], [hourly_rate])
+        VALUES (source.[id], source.[job_name], source.[hourly_rate]);
+      `,
+      firebird: '',
+      clickhouse: '',
+      oracle: `
+      MERGE INTO "BEEKEEPER"."jobs" target
+      USING (
+        SELECT ${initialID} AS "id", 'Programmer' AS "job_name", 41 AS "hourly_rate" FROM dual
+        UNION ALL
+        SELECT ${secondID}, 'Blerk', 40 FROM dual
+        UNION ALL
+        SELECT ${thirdID}, 'blarns', 39 FROM dual
+      ) source ON (target."id" = source."id")
+      WHEN MATCHED THEN
+        UPDATE SET
+          target."job_name" = source."job_name",
+          target."hourly_rate" = source."hourly_rate"
+      WHEN NOT MATCHED THEN
+        INSERT ("id", "job_name", "hourly_rate")
+        VALUES (source."id", source."job_name", source."hourly_rate");`,
     }
 
     expect(insertQuery).toBe(expectedQueries[this.dbType])

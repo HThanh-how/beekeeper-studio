@@ -48,6 +48,8 @@ import userSettingKeymap from './20241017_add_user_setting_keymap'
 import missingUserSettings from './20241017_add_missing_user_settings'
 import useBeta from './20241009_add_beta_toggle'
 import deleteDuplicateConnections from './20241115_delete_duplicate_connections'
+import addNewUrlField from './20250128_add_new_url_field'
+import fixOracleData from './20250225_oracle_default_connection_method'
 
 import ultimate from './ultimate/index'
 
@@ -74,7 +76,8 @@ const realMigrations = [
   firebirdConnection, exportPath, UserSettingsWindowPosition,
   demoSetup, minimalMode, tokenCache, libsqlOptions, nameTokenCache, lastUsedWorkspace,
   maxAllowedAppRelease, userSettingKeymap, missingUserSettings,
-  useBeta, deleteDuplicateConnections
+  useBeta, deleteDuplicateConnections, addNewUrlField,
+  fixOracleData,
 ]
 
 // fixtures require the models
